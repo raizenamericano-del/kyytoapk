@@ -1,0 +1,317 @@
+# KyyToAPK Build Engine v2.8 FINAL - FIX Release Permission
+name: KyyToAPK Super Real APK Builder
+
+permissions:
+  contents: write
+  packages: write
+  actions: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_id:
+        description: 'Unique Build ID'
+        required: true
+        type: string
+      config_json:
+        description: 'Build Config JSON'
+        required: true
+        type: string
+      callback_url:
+        description: 'Vercel webhook URL'
+        required: false
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Gradle 8.5
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.5"
+
+      - name: Install Deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq jq unzip
+          pip3 install pillow -q
+          sdkmanager --install "platforms;android-34" "build-tools;34.0.0" "platform-tools" 2>&1 | tail -n 5 || true
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+
+      - name: Parse Config
+        run: |
+          echo '${{ inputs.config_json }}' > /tmp/kyy-config.json
+          cat /tmp/kyy-config.json | python3 -m json.tool || cat /tmp/kyy-config.json
+          PACKAGE_ID=$(jq -r '.twaManifest.packageId // .config.packageName // "com.kyytoapk.app"' /tmp/kyy-config.json)
+          HOST=$(jq -r '.twaManifest.host // "example.com"' /tmp/kyy-config.json)
+          APP_NAME=$(jq -r '.twaManifest.name // .config.appName // "My App"' /tmp/kyy-config.json)
+          START_URL=$(jq -r '.twaManifest.startUrl // .config.url // "https://example.com"' /tmp/kyy-config.json)
+          VERSION_CODE=$(jq -r '.config.versionCode // 1' /tmp/kyy-config.json)
+          VERSION_NAME=$(jq -r '.config.versionName // "1.0.0"' /tmp/kyy-config.json)
+          PRIMARY_COLOR=$(jq -r '.config.primaryColor // "#7C3AED"' /tmp/kyy-config.json)
+          PACKAGE_ID=$(echo "$PACKAGE_ID" | tr '[:upper:]' '[:lower:]' | tr -d ' ' | tr '-' '_' | sed 's/[^a-z0-9._]//g')
+          echo "PACKAGE_ID=$PACKAGE_ID" >> $GITHUB_ENV
+          echo "APP_NAME=$APP_NAME" >> $GITHUB_ENV
+          echo "START_URL=$START_URL" >> $GITHUB_ENV
+          echo "HOST=$HOST" >> $GITHUB_ENV
+          echo "VERSION_CODE=$VERSION_CODE" >> $GITHUB_ENV
+          echo "VERSION_NAME=$VERSION_NAME" >> $GITHUB_ENV
+          echo "PRIMARY_COLOR=$PRIMARY_COLOR" >> $GITHUB_ENV
+
+      - name: Create Android Project
+        run: |
+          set -e
+          rm -rf twa-project
+          mkdir -p twa-project/app/src/main/res/values
+          mkdir -p twa-project/app/src/main/res/mipmap-hdpi
+          mkdir -p twa-project/app/src/main/res/mipmap-xhdpi
+          mkdir -p twa-project/app/src/main/res/mipmap-xxhdpi
+          mkdir -p twa-project/app/src/main/res/mipmap-xxxhdpi
+          mkdir -p twa-project/app/src/main/res/drawable
+          mkdir -p twa-project/gradle/wrapper
+          PACKAGE_PATH=$(echo ${{ env.PACKAGE_ID }} | tr '.' '/')
+          mkdir -p twa-project/app/src/main/java/$PACKAGE_PATH
+
+          cat > twa-project/settings.gradle <<'SETT'
+          include ':app'
+          SETT
+
+          cat > twa-project/build.gradle <<'ROOT'
+          buildscript {
+            repositories { google(); mavenCentral() }
+            dependencies { classpath 'com.android.tools.build:gradle:8.2.2' }
+          }
+          allprojects { repositories { google(); mavenCentral() } }
+          task clean(type: Delete) { delete rootProject.buildDir }
+          ROOT
+
+          cat > twa-project/app/build.gradle <<GRADLE
+          apply plugin: 'com.android.application'
+          android {
+            compileSdk 34
+            namespace '${{ env.PACKAGE_ID }}'
+            defaultConfig {
+              applicationId "${{ env.PACKAGE_ID }}"
+              minSdk 21
+              targetSdk 34
+              versionCode ${{ env.VERSION_CODE }}
+              versionName "${{ env.VERSION_NAME }}"
+            }
+            buildTypes {
+              release { minifyEnabled false; proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro' }
+              debug { debuggable true; zipAlignEnabled true }
+            }
+            compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+          }
+          dependencies {
+            implementation 'androidx.appcompat:appcompat:1.6.1'
+            implementation 'com.google.android.material:material:1.11.0'
+            implementation 'androidx.swiperefreshlayout:swiperefreshlayout:1.1.0'
+          }
+          GRADLE
+
+          PERMS=$(jq -r '.androidConfig.permissions[]? // empty' /tmp/kyy-config.json | sed 's/^/    <uses-permission android:name="/;s/$/" \/>/' || true)
+          if [ -z "$PERMS" ]; then
+            PERMS="    <uses-permission android:name=\"android.permission.INTERNET\" />"
+          fi
+
+          cat > twa-project/app/src/main/AndroidManifest.xml <<MANIFEST
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+          ${PERMS}
+              <application
+                  android:allowBackup="true"
+                  android:icon="@mipmap/ic_launcher"
+                  android:label="${{ env.APP_NAME }}"
+                  android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
+                  android:usesCleartextTraffic="true">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:configChanges="orientation|screenSize|keyboardHidden"
+                      android:hardwareAccelerated="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          MANIFEST
+
+          cat > twa-project/app/src/main/res/values/colors.xml <<COLOR
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <color name="primary">${{ env.PRIMARY_COLOR }}</color>
+              <color name="primary_dark">#000000</color>
+          </resources>
+          COLOR
+
+          cat > twa-project/gradle.properties <<'GPROP'
+          # Required: this project uses AndroidX dependencies (appcompat, material, swiperefreshlayout).
+          # Without android.useAndroidX=true AGP fails with:
+          #   "This project uses AndroidX dependencies, but the 'android.useAndroidX' property is not enabled"
+          android.useAndroidX=true
+          android.enableJetifier=true
+          android.nonTransitiveRClass=true
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          org.gradle.parallel=true
+          org.gradle.caching=true
+          GPROP
+
+          cat > twa-project/app/src/main/java/$PACKAGE_PATH/MainActivity.java <<JAVA
+          package ${{ env.PACKAGE_ID }};
+          import android.app.Activity; import android.os.Bundle; import android.webkit.*; import android.content.Intent; import android.net.Uri; import android.graphics.Color; import android.widget.LinearLayout; import android.widget.TextView; import android.view.ViewGroup; import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
+          public class MainActivity extends Activity {
+              WebView webView; SwipeRefreshLayout swipeLayout;
+              @Override protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  LinearLayout root = new LinearLayout(this); root.setOrientation(LinearLayout.VERTICAL); root.setBackgroundColor(Color.WHITE);
+                  root.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+                  LinearLayout toolbar = new LinearLayout(this);
+                  try { toolbar.setBackgroundColor(Color.parseColor("${{ env.PRIMARY_COLOR }}")); } catch(Exception e){ toolbar.setBackgroundColor(Color.parseColor("#7C3AED")); }
+                  toolbar.setPadding(32,32,32,32);
+                  TextView title = new TextView(this); title.setText("${{ env.APP_NAME }}"); title.setTextColor(Color.WHITE); title.setTextSize(18); title.setTypeface(null, android.graphics.Typeface.BOLD);
+                  toolbar.addView(title);
+                  root.addView(toolbar, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+                  swipeLayout = new SwipeRefreshLayout(this);
+                  swipeLayout.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+                  webView = new WebView(this);
+                  webView.setLayoutParams(new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+                  WebSettings s = webView.getSettings(); s.setJavaScriptEnabled(true); s.setDomStorageEnabled(true); s.setAllowFileAccess(true); s.setAllowContentAccess(true); s.setGeolocationEnabled(true); s.setCacheMode(WebSettings.LOAD_DEFAULT); s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+                  webView.setWebViewClient(new WebViewClient() {
+                      @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                          String url = request.getUrl().toString();
+                          if (!url.contains("${{ env.HOST }}")) { try { Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse(url)); startActivity(i); return true; } catch(Exception e){ return false; } }
+                          return false;
+                      }
+                      @Override public void onPageFinished(WebView view, String url) { swipeLayout.setRefreshing(false); super.onPageFinished(view, url); }
+                  });
+                  webView.setWebChromeClient(new WebChromeClient() { @Override public void onGeolocationPermissionsShowPrompt(String origin, GeolocationPermissions.Callback callback) { callback.invoke(origin, true, false); } });
+                  webView.setDownloadListener((url, ua, cd, mime, len) -> { Intent i = new Intent(Intent.ACTION_VIEW); i.setData(Uri.parse(url)); startActivity(i); });
+                  swipeLayout.setOnRefreshListener(() -> webView.reload());
+                  swipeLayout.addView(webView); root.addView(swipeLayout);
+                  setContentView(root); webView.loadUrl("${{ env.START_URL }}");
+              }
+              @Override public void onBackPressed() { if (webView != null && webView.canGoBack()) webView.goBack(); else super.onBackPressed(); }
+          }
+          JAVA
+
+          echo "" > twa-project/app/proguard-rules.pro
+          echo "sdk.dir=$ANDROID_HOME" > twa-project/local.properties
+          cat > twa-project/gradle/wrapper/gradle-wrapper.properties <<PROP
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-8.5-bin.zip
+          networkTimeout=10000
+          validateDistributionUrl=true
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
+          PROP
+
+          WRAPPER_JAR="twa-project/gradle/wrapper/gradle-wrapper.jar"
+          curl -fsSL --retry 3 -o "$WRAPPER_JAR" https://github.com/gradle/gradle/raw/v8.5.0/gradle/wrapper/gradle-wrapper.jar || curl -fsSL --retry 3 -o "$WRAPPER_JAR" https://repo1.maven.org/maven2/org/gradle/gradle-wrapper/8.5/gradle-wrapper-8.5.jar || true
+          cat > twa-project/gradlew <<'GW'
+          #!/bin/sh
+          APP_HOME=$(dirname "$0")
+          WRAPPER_JAR="$APP_HOME/gradle/wrapper/gradle-wrapper.jar"
+          if [ -f "$WRAPPER_JAR" ]; then exec java -jar "$WRAPPER_JAR" "$@"; else exec gradle "$@"; fi
+          GW
+          chmod +x twa-project/gradlew
+
+      - name: Generate Icons
+        run: |
+          ICON_B64=$(jq -r '.assets.iconBase64 // empty' /tmp/kyy-config.json | head -c 5000000)
+          if [ -n "$ICON_B64" ] && [ ${#ICON_B64} -gt 100 ]; then
+            echo "$ICON_B64" | sed 's/^data:image\/[^;]*;base64,//' | base64 -d > /tmp/icon.png || true
+          fi
+          python3 << 'PY'
+          from PIL import Image
+          import os
+          primary="${{ env.PRIMARY_COLOR }}".lstrip('#')
+          try: r=int(primary[0:2],16); g=int(primary[2:4],16); b=int(primary[4:6],16)
+          except: r,g,b=124,58,237
+          src="/tmp/icon.png"
+          has_src=os.path.exists(src) and os.path.getsize(src)>10
+          if has_src:
+              try: img=Image.open(src).convert("RGBA")
+              except: has_src=False
+          if not has_src: img=Image.new('RGB', (192,192), color=(r,g,b))
+          for folder,size in [("mipmap-hdpi",72),("mipmap-xhdpi",96),("mipmap-xxhdpi",144),("mipmap-xxxhdpi",192),("drawable",192)]:
+              p=f"twa-project/app/src/main/res/{folder}/ic_launcher.png"
+              os.makedirs(os.path.dirname(p), exist_ok=True)
+              img.resize((size,size), Image.LANCZOS).save(p)
+          print("Icons OK")
+          PY
+
+      - name: Build APK
+        run: |
+          cd twa-project
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+          chmod +x gradlew
+          ./gradlew --version || gradle --version
+          # Build the debug APK. Try the Gradle wrapper first, then the globally installed Gradle.
+          # NOTE: errors are intentionally NOT masked so real failures surface in the log.
+          ./gradlew clean assembleDebug --stacktrace --no-daemon || gradle clean assembleDebug --stacktrace --no-daemon
+          # Fail loudly if no APK was produced instead of silently shipping an empty release.
+          APK_FILE=$(find app/build/outputs -name "*.apk" -type f | head -1)
+          if [ -z "$APK_FILE" ]; then
+            echo "::error::Gradle finished but no APK was produced. See the build log above for the real error."
+            exit 1
+          fi
+          echo "APK produced: $APK_FILE"
+          ls -lh "$APK_FILE"
+          mkdir -p ../build-output
+          cp "$APK_FILE" "../build-output/${{ env.PACKAGE_ID }}-${{ inputs.build_id }}.apk"
+          cd ..
+          ls -lh build-output/
+
+      - name: Upload Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-${{ inputs.build_id }}
+          path: build-output/
+          retention-days: 7
+
+      - name: Create Release
+        if: always()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ inputs.build_id }}
+          files: build-output/*.apk
+          body: |
+            App: ${{ env.APP_NAME }}
+            Package: ${{ env.PACKAGE_ID }}
+            Build ID: ${{ inputs.build_id }}
+            URL: ${{ env.START_URL }}
+            Built with Gradle 8.5 + SDK 34
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Notify Vercel
+        if: always()
+        run: |
+          if [ -n "${{ inputs.callback_url }}" ]; then
+            if ls build-output/*.apk 1>/dev/null 2>&1; then STATUS="ready"; MSG="Build completed successfully"; PROG=100; else STATUS="failed"; MSG="Build failed - check Actions logs"; PROG=100; fi
+            for i in 1 2 3; do
+              curl -X PATCH "${{ inputs.callback_url }}" -H "Content-Type: application/json" -d "{\"status\":\"$STATUS\",\"progress\":$PROG,\"message\":\"$MSG\",\"downloadUrl\":\"https://github.com/${{ github.repository }}/releases/download/build-${{ inputs.build_id }}/${{ env.PACKAGE_ID }}-${{ inputs.build_id }}.apk\",\"sourceZipUrl\":\"https://github.com/${{ github.repository }}/releases/tag/build-${{ inputs.build_id }}\",\"logs\":\"Build $STATUS\"}" && break || sleep 2
+            done
+          fi
