@@ -1,0 +1,39 @@
+CARA SET ENV DI VERCEL BIAR REAL APK (BUKAN MOCK)
+
+1. Buka https://github.com/settings/tokens
+   - Klik Generate new token -> Tokens (classic)
+   - Note: KyyToAPK Builder
+   - Expiration: No expiration (atau 90 days)
+   - Centang: repo (semua), workflow
+   - Generate -> Copy token ghp_...
+
+2. Buka https://vercel.com/dashboard
+   - Pilih project kyytoapk.vercel.app
+   - Settings -> Environment Variables
+   - Tambah 5 variable ini satu per satu:
+
+   Name: GITHUB_TOKEN
+   Value: ghp_xxx kamu tadi paste
+   Env: centang Production, Preview, Development
+
+   Name: GITHUB_REPO_OWNER
+   Value: raizenamericano-del
+
+   Name: GITHUB_REPO_NAME
+   Value: kyytoapk
+
+   Name: GITHUB_WORKFLOW_ID
+   Value: build-apk.yml
+
+   Name: NEXT_PUBLIC_APP_URL
+   Value: https://kyytoapk.vercel.app
+
+3. Save -> ke tab Deployments -> Latest deployment -> ... -> Redeploy (centang Use existing Build Cache OFF)
+
+4. Selesai. Test build lagi, harusnya sekarang REAL APK.
+
+Kalau mau lebih permanen tanpa 404 cold start, aktifkan Vercel KV:
+- Vercel Dashboard -> Storage -> Create Database -> KV (Upstash Redis) -> Connect ke project kyytoapk
+- ENV KV otomatis ke-inject, buildStore akan persist.
+
+Done!
